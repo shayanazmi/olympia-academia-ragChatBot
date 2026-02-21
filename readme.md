@@ -1,7 +1,3 @@
-Here's the updated `src/README.md` that now includes the `app.py` documentation:
-
-## Updated `src/README.md`
-
 ```markdown
 <div align="center">
 
