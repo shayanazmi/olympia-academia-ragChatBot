@@ -71,14 +71,9 @@ from .cleaner import (
 
 # From universal_ingestor.py
 from .universal_ingestor import (
-    UniversalIngestor,
-    IngestedContent,
-    BaseScraper,
-    YouTubeScraper,
-    WebScraper,
-    DEFAULT_HEADERS,
-    REQUEST_TIMEOUT,
-    MAX_WORKERS,
+    get_youtube_transcript,
+    get_website_content,
+    process_links_batch,
 )
 
 # ==========================================

@@ -12,8 +12,9 @@ streamlit>=1.31.0
 python-dotenv>=1.0.0
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LLM & AI ENRICHMENT
+# LLM & AI ENRICHMENT (NVIDIA NIM & Local)
 # ─────────────────────────────────────────────────────────────────────────────
+openai>=1.10.0
 ollama>=0.4.0
 sentence-transformers>=2.2.2
 transformers>=4.36.0

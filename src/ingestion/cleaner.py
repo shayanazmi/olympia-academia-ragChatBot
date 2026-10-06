@@ -39,16 +39,14 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Path Configuration - Updated for new project structure
-PROJECT_ROOT = Path("D:/college/Olympia Academia/oa_chatbot/olympia-academia")
-DATA_DIR = PROJECT_ROOT / "data"
-RAW_DIR = DATA_DIR / "raw"
-PROCESSED_DIR = DATA_DIR / "processed"
-BACKUP_DIR = DATA_DIR / "backups"
-
-# Ensure directories exist
-for dir_path in [RAW_DIR, PROCESSED_DIR, BACKUP_DIR]:
-    dir_path.mkdir(parents=True, exist_ok=True)
+# Path Configuration - Dynamically resolved
+from src.utils.config import (
+    PROJECT_ROOT,
+    DATA_DIR,
+    RAW_DATA_DIR as RAW_DIR,
+    PROCESSED_DATA_DIR as PROCESSED_DIR,
+    BACKUP_DIR,
+)
 
 # File paths
 INPUT_FILE = RAW_DIR / "whatsapp_links_unique.xlsx"  # From link_extractor.py

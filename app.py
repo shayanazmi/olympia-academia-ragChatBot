@@ -1,17 +1,32 @@
 import sys
 import os
+from pathlib import Path
 
-# --- 0. FORCE PATH FIX ---
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+# Force project root onto sys.path
+BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
 
-import streamlit as st
-import ollama
 import json
 import time
+import streamlit as st
 from dotenv import load_dotenv
 
-# --- 1. CONFIGURATION & STYLING ---
 load_dotenv()
+
+from src.engine.rag_engine import Librarian
+from src.database.build_db import DatabaseBuilder
+from src.utils.nim_client import NIMClient, NIMAuthenticationError, NIMRateLimitError
+from src.utils.config import (
+    NVIDIA_PRIMARY_MODEL,
+    NVIDIA_FAST_MODEL,
+    NVIDIA_API_KEY,
+    FAISS_INDEX_PATH,
+)
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 1. STREAMLIT PAGE CONFIG & STYLING
+# ══════════════════════════════════════════════════════════════════════════════
 
 st.set_page_config(
     page_title="Olympia Academia",
@@ -20,23 +35,17 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS for "Academic Studio" Look
 st.markdown("""
 <style>
-    /* Main Background & Fonts */
     .stApp {
         background-color: #0e1117;
         color: #e0e0e0;
     }
-    
-    /* Header Styling */
     h1 {
         font-family: 'Helvetica Neue', sans-serif;
         font-weight: 700;
         color: #ffffff;
     }
-    
-    /* Chat Bubble Styling */
     .stChatMessage {
         background-color: #1a1c24;
         border-radius: 15px;
@@ -44,36 +53,29 @@ st.markdown("""
         border: 1px solid #2d2f3b;
         margin-bottom: 10px;
     }
-    
-    /* User Message distinct color */
     div[data-testid="stChatMessage"]:nth-child(odd) {
         background-color: #13151b;
     }
-
-    /* Source Card Styling */
     .source-card {
         background-color: #262730;
-        padding: 10px;
+        padding: 12px;
         border-radius: 8px;
-        border-left: 4px solid #4CAF50;
+        border-left: 4px solid #76b900; /* NVIDIA Green */
         margin-bottom: 10px;
     }
     .source-title {
         font-weight: bold;
-        color: #81c784;
+        color: #a3e635;
         font-size: 1.05em;
     }
     .source-meta {
         font-size: 0.85em;
         color: #b0bec5;
+        margin-top: 3px;
     }
-    
-    /* Sidebar Styling */
     section[data-testid="stSidebar"] {
         background-color: #161920;
     }
-    
-    /* Button Styling */
     .stButton button {
         background-color: #2d2f3b;
         color: white;
@@ -82,170 +84,226 @@ st.markdown("""
         transition: all 0.3s;
     }
     .stButton button:hover {
-        background-color: #4CAF50;
-        border-color: #4CAF50;
-        color: white;
+        background-color: #76b900;
+        border-color: #76b900;
+        color: black;
+        font-weight: bold;
     }
 </style>
 """, unsafe_allow_html=True)
 
-try:
-    from architecture.rag_engine import Librarian
-except ImportError as e:
-    st.error(f"❌ Configuration Error: {e}")
-    st.stop()
+# ══════════════════════════════════════════════════════════════════════════════
+# 2. INITIALIZE SERVICES
+# ══════════════════════════════════════════════════════════════════════════════
 
-# API Configuration
-MODEL_NAME = "deepseek-v3.1:671b-cloud"
-API_KEY = os.getenv("OLLAMA_API_KEY")
+@st.cache_resource
+def get_nim_client():
+    return NIMClient()
 
-if not API_KEY:
-    st.error("⚠️ API Key Missing! Check .env file.")
-    st.stop()
-
-# --- 2. INITIALIZE ENGINE ---
 @st.cache_resource
 def get_librarian():
     try:
-        return Librarian()
+        if FAISS_INDEX_PATH.exists():
+            return Librarian()
+        return None
     except Exception:
         return None
 
+nim_client = get_nim_client()
 librarian = get_librarian()
 
-# --- 3. HELPER FUNCTIONS ---
-def refine_query(client, user_input, history):
-    if not history: return True, [user_input]
-    recent_history = history[-3:] 
-    history_str = "\n".join([f"{msg['role']}: {msg['content'][:300]}..." for msg in recent_history])
+# ══════════════════════════════════════════════════════════════════════════════
+# 3. HELPER FUNCTIONS
+# ══════════════════════════════════════════════════════════════════════════════
 
-    router_prompt = f"""
-    Analyze conversation. Determine if User Input requires a NEW Database Search.
-    CHAT HISTORY: {history_str}
-    USER INPUT: "{user_input}"
-    RULES: "search": true for new info. "search": false for chat/follow-up.
-    If true, generate 3 varied search queries.
-    OUTPUT JSON: {{ "search": <bool>, "queries": ["q1", "q2", "q3"] }}
-    """
+def refine_query(client: NIMClient, user_input: str, history: list):
+    """Uses NVIDIA NIM fast model to determine if retrieval is needed and generate sub-queries."""
+    if not history:
+        return True, [user_input]
+        
+    recent_history = history[-3:]
+    history_str = "\n".join([f"{msg['role']}: {msg['content'][:250]}..." for msg in recent_history])
+
+    router_prompt = f"""You are a query analysis agent for an academic RAG system.
+Analyze the user's latest input in the context of recent chat history.
+Determine if the input requires a NEW database search or is conversational.
+If search is required, generate 3 specific, diverse search queries.
+
+CHAT HISTORY:
+{history_str}
+
+USER INPUT: "{user_input}"
+
+OUTPUT JSON ONLY with this exact schema:
+{{
+  "search": true,
+  "queries": ["query 1", "query 2", "query 3"]
+}}
+"""
     try:
-        response = client.chat(model=MODEL_NAME, messages=[{'role': 'user', 'content': router_prompt}])
-        content = response['message']['content']
-        if "{" in content:
-            content = content[content.find("{"):content.rfind("}")+1]
-            data = json.loads(content)
-            queries = data.get("queries", [user_input])
-            if isinstance(queries, str): queries = [queries]
-            return data.get("search", True), queries
-        return True, [user_input]
-    except:
+        content = client.chat(
+            messages=[{"role": "user", "content": router_prompt}],
+            model=NVIDIA_FAST_MODEL,
+            temperature=0.2,
+            json_mode=True,
+        )
+        data = json.loads(content)
+        queries = data.get("queries", [user_input])
+        if isinstance(queries, str):
+            queries = [queries]
+        return data.get("search", True), queries
+    except Exception:
         return True, [user_input]
 
-# --- 4. SESSION STATE ---
+# ══════════════════════════════════════════════════════════════════════════════
+# 4. SESSION STATE
+# ══════════════════════════════════════════════════════════════════════════════
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "last_context" not in st.session_state:
     st.session_state.last_context = ""
 
-# --- 5. SIDEBAR ---
+# ══════════════════════════════════════════════════════════════════════════════
+# 5. SIDEBAR
+# ══════════════════════════════════════════════════════════════════════════════
+
 with st.sidebar:
-    st.title("🏛️ Olympia")
-    st.caption("v2.4 | Research Mode")
+    st.title("🏛️ Olympia Academia")
+    st.caption(f"Powered by NVIDIA NIM & Hybrid Search")
     st.markdown("---")
     
     col1, col2 = st.columns(2)
     with col1:
-        st.metric("Database", "Active", delta="On")
+        db_status = "Active" if librarian is not None else "Unindexed"
+        st.metric("Database", db_status)
     with col2:
-        st.metric("Guardrails", "Strict", delta="High")
+        st.metric("Primary Model", NVIDIA_PRIMARY_MODEL.split("/")[-1][:12])
         
-    st.markdown("### ⚙️ Controls")
-    if st.button("🗑️ Clear Memory", use_container_width=True):
+    st.markdown("### ⚙️ Database & Controls")
+    
+    if librarian is None:
+        st.warning("Database indices not found.")
+        if st.button("🌱 Build Seed Academic Database", use_container_width=True):
+            with st.spinner("Building FAISS & BM25 indices from curated academic data..."):
+                builder = DatabaseBuilder(use_sample=True)
+                builder.build_all()
+                st.cache_resource.clear()
+                st.success("Database built successfully!")
+                time.sleep(1)
+                st.rerun()
+    else:
+        stats = librarian.get_stats()
+        st.caption(f"📚 **Indexed Docs:** {stats['total_documents']} | ⚡ **Vectors:** {stats['vector_count']}")
+        st.caption(f"🎯 **Cache Rate:** {stats['cache_hit_rate']}")
+
+    if st.button("🗑️ Clear Chat History", use_container_width=True):
         st.session_state.messages = []
         st.session_state.last_context = ""
         st.rerun()
 
-    st.info("**System Status:** All Systems Operational.")
+    st.markdown("---")
+    if not NVIDIA_API_KEY:
+        st.error("⚠️ NVIDIA_API_KEY missing! Add it to your `.env` file.")
+    else:
+        st.success("🟢 NVIDIA NIM Connected")
 
-# --- 6. HERO SECTION ---
+# ══════════════════════════════════════════════════════════════════════════════
+# 6. HERO SECTION
+# ══════════════════════════════════════════════════════════════════════════════
+
 if not st.session_state.messages:
     st.markdown("""
-    <div style="text-align: center; margin-top: 50px; margin-bottom: 50px;">
-        <h1 style="font-size: 3em;">Olympia Academia</h1>
-        <p style="font-size: 1.2em; color: #b0bec5;">Your Context-Aware Research Assistant</p>
+    <div style="text-align: center; margin-top: 40px; margin-bottom: 40px;">
+        <h1 style="font-size: 2.8em;">Olympia Academia</h1>
+        <p style="font-size: 1.15em; color: #b0bec5;">Academic Research Assistant with Grounded Hybrid Retrieval</p>
     </div>
     """, unsafe_allow_html=True)
     
     col1, col2, col3 = st.columns(3)
     with col1:
-        if st.button("🐦 Bird Navigation", use_container_width=True):
-            st.session_state.messages.append({"role": "user", "content": "How do birds navigate?"})
+        if st.button("🐦 Quantum Avian Navigation", use_container_width=True):
+            st.session_state.messages.append({"role": "user", "content": "How do migratory birds use quantum mechanics to navigate?"})
             st.rerun()
     with col2:
-        if st.button("📐 Grothendieck", use_container_width=True):
-            st.session_state.messages.append({"role": "user", "content": "Explain the relationship between Grothendieck and Quillen"})
+        if st.button("📐 Grothendieck to Quillen", use_container_width=True):
+            st.session_state.messages.append({"role": "user", "content": "What is the content of Grothendieck's letter to Daniel Quillen?"})
             st.rerun()
     with col3:
-        if st.button("💻 Lean Language", use_container_width=True):
-            st.session_state.messages.append({"role": "user", "content": "What is the Lean programming language?"})
+        if st.button("💻 Lean 4 Theorem Prover", use_container_width=True):
+            st.session_state.messages.append({"role": "user", "content": "What is the Lean programming language and how is it used in formal mathematics?"})
             st.rerun()
 
-# --- 7. CHAT INTERFACE ---
+# ══════════════════════════════════════════════════════════════════════════════
+# 7. CHAT HISTORY RENDERING
+# ══════════════════════════════════════════════════════════════════════════════
+
 for message in st.session_state.messages:
     with st.chat_message(message["role"], avatar="🏛️" if message["role"] == "assistant" else "👤"):
         st.markdown(message["content"])
 
-# --- 8. REGENERATION BUTTON ---
-if st.session_state.messages and st.session_state.messages[-1]["role"] == "assistant":
-    if st.button("🔄 Regenerate Answer", key="regen_btn"):
-        st.session_state.messages.pop()
-        st.rerun()
+# ══════════════════════════════════════════════════════════════════════════════
+# 8. MAIN QUERY PIPELINE
+# ══════════════════════════════════════════════════════════════════════════════
 
-# --- 9. MAIN LOGIC PIPELINE ---
-if prompt := st.chat_input("Ask a research question..."):
+if prompt := st.chat_input("Ask an academic or scientific research question..."):
     
+    # Verify API key first
+    if not NVIDIA_API_KEY:
+        st.error("❌ NVIDIA_API_KEY is not configured. Please add `NVIDIA_API_KEY=nvapi-...` to your `.env` file.")
+        st.stop()
+
     st.session_state.messages.append({"role": "user", "content": prompt})
     with st.chat_message("user", avatar="👤"):
         st.markdown(prompt)
 
-    client = ollama.Client(host='https://ollama.com', headers={'Authorization': f'Bearer {API_KEY}'})
+    # Missing database guard
+    if librarian is None:
+        with st.chat_message("assistant", avatar="🏛️"):
+            st.warning("⚠️ The knowledge base index has not been built yet. Please click **'Build Seed Academic Database'** in the sidebar to initialize the search database.")
+        st.stop()
 
-    # --- ROUTING ---
     final_results = []
-    with st.status("🧠 Processing...", expanded=False) as status:
-        needs_search, queries = refine_query(client, prompt, st.session_state.messages[:-1])
+    
+    with st.status("🧠 Processing Research Query...", expanded=False) as status:
+        # Step A: Query Routing
+        needs_search, queries = refine_query(nim_client, prompt, st.session_state.messages[:-1])
         
         if needs_search:
-            status.update(label=f"🔎 Searching: {queries[0]}...", state="running")
+            status.update(label=f"🔎 Hybrid Search: {queries[0]}...", state="running")
             all_results = {}
+            
             for q in queries:
-                res = librarian.search(q, top_k=5) 
+                res = librarian.search(q, top_k=5)
                 for r in res:
                     if r['id'] not in all_results or r['score'] > all_results[r['id']]['score']:
                         all_results[r['id']] = r
-            
+                        
             final_results = sorted(all_results.values(), key=lambda x: x['score'], reverse=True)[:8]
             
-            # IMPROVED CONTEXT STRING: Now includes explicit [TYPE] tag
+            # Format Context String
             context_str = ""
             if final_results:
-                context_str += "### RETRIEVED RESOURCES:\n"
-                for i, r in enumerate(final_results):
-                    # Use .get() with defaults to prevent crashes
-                    rtype = r.get('type', 'General Resource')
-                    title = r.get('title', 'Untitled')
-                    link = r.get('link', '#')
-                    summary = r.get('summary', 'No summary.')
-                    context_str += f"Record {i+1}: [Type: {rtype}] Title: {title} | Link: {link} | Summary: {summary}\n"
+                context_str += "### RETRIEVED ACADEMIC RESOURCES:\n"
+                for i, r in enumerate(final_results, 1):
+                    context_str += (
+                        f"Record {i}: [Type: {r.get('type', 'Resource')}] "
+                        f"Title: {r.get('title', 'Untitled')} | "
+                        f"Link: {r.get('link', '#')} | "
+                        f"Topic: {r.get('topic', 'General')} | "
+                        f"Summary: {r.get('summary', '')} | "
+                        f"Insights: {r.get('insights', '')}\n"
+                    )
             else:
                 context_str = "No specific database records found."
-            
+                
             st.session_state.last_context = context_str
-            status.update(label="✅ Context Retrieved", state="complete", expanded=False)
+            status.update(label=f"✅ Retrieved {len(final_results)} Academic Sources", state="complete", expanded=False)
         else:
-            status.update(label="🧠 Using Memory", state="complete")
+            status.update(label="🧠 Reasoning over existing context", state="complete")
             context_str = st.session_state.last_context
 
-    # --- SOURCE CARDS ---
+    # Step B: Source Cards Expander
     if needs_search and final_results:
         with st.expander(f"📚 View {len(final_results)} Retrieved Sources", expanded=False):
             for r in final_results:
@@ -253,94 +311,112 @@ if prompt := st.chat_input("Ask a research question..."):
                 <div class="source-card">
                     <div class="source-title">📄 {r.get('title', 'Untitled')}</div>
                     <div class="source-meta">
-                        <b>Type:</b> {r.get('type', 'Resource')} | <b>Relevance:</b> {r.get('score', 0):.2f}
+                        <b>Topic:</b> {r.get('topic', 'General')} | <b>Type:</b> {r.get('type', 'Resource')} | <b>Relevance:</b> {r.get('score', 0):.2f}
                     </div>
-                    <div style="font-size: 0.9em; margin-top: 5px;">
-                        {r.get('summary', '')[:200]}...
+                    <div style="font-size: 0.9em; margin-top: 6px;">
+                        {r.get('summary', '')}
                     </div>
-                    <div style="margin-top: 5px;">
-                        <a href="{r.get('link', '#')}" target="_blank" style="color: #64b5f6; text-decoration: none;">🔗 Open Resource</a>
+                    <div style="margin-top: 6px;">
+                        <a href="{r.get('link', '#')}" target="_blank" style="color: #a3e635; text-decoration: none;">🔗 Access Source</a>
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
 
-    # --- GENERATION (CATEGORIZED FORMAT) ---
-    system_instruction = f"""
-    You are Olympia, an expert academic assistant.
-    
-    ACTIVE KNOWLEDGE CONTEXT:
-    {context_str}
-    
-    USER INPUT: "{prompt}"
-    
-    INSTRUCTIONS:
-    1. Answer purely based on the Context.
-    2. **CRITICAL:** If the context is empty, say "I couldn't find specific resources."
-    
-    3. **OUTPUT FORMAT (Strictly Follow This Structure):**
-       
-       **Direct Answer:**
-       [Provide a detailed, synthesized answer here.]
-       
-       **Primary Resource:**
-       - **Title:** [Best Title] (Link: [URL])
-       - **Summary:** [1 sentence]
-       
-       **Related Research Papers/Articles:**
-       [List ONLY items marked as "Non-YouTube", "Article", "Paper", or "PDF" in the context.]
-       - [Title] (Link: [URL])
-       
-       **Related Videos:**
-       [List ONLY items marked as "Video" or "YouTube" in the context.]
-       - [Title] (Link: [URL])
-       
-       **Related Channels:**
-       [List ONLY items marked as "Channel" in the context.]
-       - [Channel Name] (Link: [URL])
-       
-       **Related Topics to Understand This:**
-       [List 3-4 specific academic concepts or prerequisites the user should study to understand the answer better (e.g. "Eigenvalues", "Radical Pair Mechanism").]
-       
-    4. If a category (e.g. "Channels") has no records in the context, omit that specific header.
-    """
+    # Step C: Generation via NVIDIA NIM
+    system_instruction = f"""You are Olympia, an expert academic and scientific research assistant.
+
+ACTIVE KNOWLEDGE CONTEXT:
+{context_str}
+
+USER INPUT: "{prompt}"
+
+INSTRUCTIONS:
+1. Synthesize a comprehensive answer grounded in the Active Knowledge Context.
+2. If the context does not contain sufficient details to answer, state clearly: "I couldn't find specific resources for this in the current database."
+3. Strictly format your response using this academic structure:
+
+**Direct Answer:**
+[Provide a clear, detailed, synthesized answer here.]
+
+**Primary Resource:**
+- **Title:** [Best title from context] (Link: [URL])
+- **Summary:** [1-2 sentences]
+
+**Related Research Papers / Articles:**
+[List papers or articles from the context, or omit this header if none]
+- [Title] (Link: [URL])
+
+**Related Videos:**
+[List video resources from the context, or omit this header if none]
+- [Title] (Link: [URL])
+
+**Related Topics to Understand This:**
+[List 3-4 specific foundational academic prerequisites or related topics]
+"""
 
     with st.chat_message("assistant", avatar="🏛️"):
         response_container = st.empty()
         full_response = ""
         
         try:
-            stream = client.chat(model=MODEL_NAME, messages=[{'role': 'user', 'content': system_instruction}], stream=True)
-            for chunk in stream:
-                content = chunk['message']['content']
-                full_response += content
+            stream_gen = nim_client.chat_stream(
+                messages=[{"role": "user", "content": system_instruction}],
+                model=NVIDIA_PRIMARY_MODEL,
+                temperature=0.5,
+            )
+            for chunk in stream_gen:
+                full_response += chunk
                 response_container.markdown(full_response + "▌")
             response_container.markdown(full_response)
             
-            # CRITIQUE LOOP
-            if "RETRIEVED RESOURCES" in context_str:
-                critique_prompt = f"Fact Check: Does this answer: '{full_response}' contain claims NOT in: '{context_str}'? Output UNSUPPORTED or SUPPORTED."
-                critique = client.generate(model=MODEL_NAME, prompt=critique_prompt)['response'].strip().upper()
-                if "UNSUPPORTED" in critique:
-                    st.warning("⚠️ Note: Some details may be general knowledge.")
-                else:
-                    st.caption("✅ Verified: Grounded in Database")
-            
-            st.session_state.messages.append({"role": "assistant", "content": full_response})
-            
-        except Exception as e:
-            st.error(f"Error: {e}")
+            # Step D: Fact-Check / Grounding Evaluation
+            if "RETRIEVED ACADEMIC RESOURCES" in context_str and len(full_response) > 50:
+                critique_prompt = f"""Fact Check: Does this answer:
+"{full_response}"
+contain claims contrary to or completely unsupported by:
+"{context_str}"?
+Output ONLY 'SUPPORTED' or 'UNSUPPORTED' followed by a 1-sentence note."""
+                try:
+                    critique = nim_client.chat(
+                        messages=[{"role": "user", "content": critique_prompt}],
+                        model=NVIDIA_FAST_MODEL,
+                        temperature=0.1,
+                    ).strip()
+                    if "UNSUPPORTED" in critique.upper():
+                        st.warning(f"⚠️ Note: Some claims may draw on general knowledge: {critique}")
+                    else:
+                        st.caption("✅ Verified: Grounded in Academic Database")
+                except Exception:
+                    pass
 
-    # --- FOLLOW-UP BUTTONS ---
+            st.session_state.messages.append({"role": "assistant", "content": full_response})
+
+        except NIMAuthenticationError as auth_err:
+            st.error(f"❌ {auth_err}")
+        except NIMRateLimitError as rl_err:
+            st.warning(f"⏳ {rl_err}")
+        except Exception as e:
+            st.error(f"Error during response generation: {e}")
+
+    # Step E: Interactive Follow-up Suggestions
     if len(full_response) > 50:
-        suggestion_prompt = f"Suggest 3 short follow-up questions based on: '{full_response[:500]}'. Output separated by pipes |."
+        suggestion_prompt = f"""Based on this academic answer, generate 3 short, thought-provoking follow-up research questions.
+Answer: "{full_response[:400]}"
+Output format: Q1 | Q2 | Q3 (separated by pipes ONLY, no numbers or extra text)."""
         try:
-            sug_resp = client.generate(model=MODEL_NAME, prompt=suggestion_prompt)
-            suggestions = [s.strip() for s in sug_resp['response'].split('|') if len(s) > 5]
+            sug_resp = nim_client.chat(
+                messages=[{"role": "user", "content": suggestion_prompt}],
+                model=NVIDIA_FAST_MODEL,
+                temperature=0.7,
+            )
+            suggestions = [s.strip() for s in sug_resp.split('|') if len(s.strip()) > 5][:3]
             if suggestions:
                 st.markdown("---")
                 cols = st.columns(len(suggestions))
                 for i, sug in enumerate(suggestions):
-                    if cols[i].button(sug, key=f"sug_{int(time.time())}_{i}"):
-                        st.session_state.messages.append({"role": "user", "content": sug})
+                    clean_sug = sug.lstrip("0123456789. -")
+                    if cols[i].button(clean_sug, key=f"sug_{int(time.time())}_{i}"):
+                        st.session_state.messages.append({"role": "user", "content": clean_sug})
                         st.rerun()
-        except: pass
+        except Exception:
+            pass

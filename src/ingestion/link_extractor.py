@@ -33,26 +33,20 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Path Configuration - Updated for new project structure
-PROJECT_ROOT = Path("D:/college/Olympia Academia/oa_chatbot/olympia-academia")
-DATA_DIR = PROJECT_ROOT / "data"
-RAW_DIR = DATA_DIR / "raw"
-CHAT_DIR = Path("D:/college/Olympia Academia/oa_chatbot/OlympiaAcademia_chat")
+# Path Configuration - Dynamically resolved
+from src.utils.config import PROJECT_ROOT, DATA_DIR, RAW_DATA_DIR as RAW_DIR
 
-# Ensure directories exist
+CHAT_DIR = DATA_DIR / "chats"
 RAW_DIR.mkdir(parents=True, exist_ok=True)
+CHAT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Output files
 OUTPUT_EXCEL = RAW_DIR / "whatsapp_links_unique.xlsx"
 OUTPUT_CSV = RAW_DIR / "whatsapp_links_unique.csv"
 OUTPUT_JSON = RAW_DIR / "whatsapp_links_unique.json"
 
-# Chat files to process (update with your actual paths)
-CHAT_FILES = [
-    CHAT_DIR / "WhatsApp_Chat_with_OlympiaAcademia" / "WhatsApp_Chat_with_OlympiaAcademia.txt",
-    CHAT_DIR / "WhatsApp_Chat_with_OlympiaAcademia_AMU" / "WhatsApp_Chat_with_OlympiaAcademia_AMU.txt",
-    CHAT_DIR / "WhatsApp_Chat_with_Olympia_academia_JMI" / "WhatsApp_Chat_with_Olympia_academia_JMI.txt"
-]
+# Chat files to process (auto-discovers .txt files in data/chats/)
+CHAT_FILES = list(CHAT_DIR.glob("*.txt")) or list(CHAT_DIR.glob("*/*.txt"))
 
 # ==========================================
 # REGEX PATTERNS

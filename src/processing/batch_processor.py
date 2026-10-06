@@ -8,28 +8,22 @@ import shutil
 from datetime import datetime
 from pathlib import Path
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
-# Path Configuration - Updated for new project structure
-PROJECT_ROOT = Path("D:/college/Olympia Academia/oa_chatbot/olympia-academia")
-DATA_DIR = PROJECT_ROOT / "data"
-PROCESSED_DIR = DATA_DIR / "processed"
-BACKUP_DIR = DATA_DIR / "backups"
-
-# Ensure directories exist
-PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+# Path Configuration - Dynamically resolved
+from src.utils.config import (
+    PROJECT_ROOT,
+    DATA_DIR,
+    PROCESSED_DATA_DIR as PROCESSED_DIR,
+    BACKUP_DIR,
+    NVIDIA_FAST_MODEL as MODEL_NAME,
+)
+from src.utils.nim_client import NIMClient
 
 # File paths
 INPUT_FILE = PROCESSED_DIR / "oa_cleaned.xlsx"
 OUTPUT_FILE = PROCESSED_DIR / "oa_enriched.xlsx"
 
-API_KEY = "a48f579723f34e0ab56c4ef8cb58bc73.nYkG9XvkGfwZ6fRk1AZW0noI"
-MODEL_NAME = "deepseek-v3.1:671b-cloud"
 BATCH_SIZE = 10 
-
-client = ollama.Client(host="https://ollama.com", headers={'Authorization': f'Bearer {API_KEY}'})
+client = NIMClient()
 
 # ==========================================
 # 1. SAFETY SYSTEMS
@@ -165,8 +159,7 @@ def run_batch_enrichment():
             try:
                 # API Call
                 prompt = generate_batch_prompt(records)
-                response = client.chat(model=MODEL_NAME, messages=[{'role': 'user', 'content': prompt}])
-                raw_json = response['message']['content']
+                raw_json = client.chat(messages=[{'role': 'user', 'content': prompt}], model=MODEL_NAME)
 
                 # Extract & Parse JSON
                 json_match = re.search(r'\[.*\]', raw_json, re.DOTALL)

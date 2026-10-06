@@ -53,36 +53,28 @@ PROJECT_NAME = "Olympia Academia"
 PROJECT_DESCRIPTION = "Privacy-first RAG system for WhatsApp knowledge bases"
 
 # Import version info from submodules
-from . import ingestion
-from . import processing
-from . import database
-from . import engine
-from . import utils
+from src import ingestion
+from src import processing
+from src import database
+from src import engine
+from src import utils
 
 # Make commonly used classes easily accessible
-from .ingestion import (
-    LinkExtractor,
-    LinkCleaner,
-    UniversalIngestor,
-    IngestionPipeline,
-)
-
-from .engine.rag_engine import (
+from src.engine.rag_engine import (
     HybridSearchEngine,
-    Librarian,  # Legacy alias
+    Librarian,
 )
 
-from .database.build_db import DatabaseBuilder
+from src.database.build_db import DatabaseBuilder
 
-from .utils.config import (
+from src.utils.config import (
     PROJECT_ROOT,
     DATA_DIR,
     DB_DIR,
-    OLLAMA_MODEL,
     EMBEDDING_MODEL,
 )
 
-from .utils.limit_checker import (
+from src.utils.limit_checker import (
     check_and_update_limit,
     init_limits_db,
 )

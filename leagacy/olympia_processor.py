@@ -20,12 +20,7 @@ key_stats = {}  # index -> {"used": int, "last_429": str, "disabled_until": date
 # CONFIGURATION
 # ==========================================
 # 1. PASTE ALL YOUR 6 API KEYS HERE
-API_KEYS = [
-    "AIzaSyBk-WnR4fbHM6zniKmoCBBOqhDL55q4bCI",#Shayanazmi04
-    "AIzaSyATvfUJjkyo4ZcHzNkrDx4k94u6tkdoihg",#
-    "AIzaSyBfMPPYP8zru01m-hj12cn51RuNSheX7no",#
-    
-]
+API_KEYS = [k.strip() for k in os.getenv("GEMINI_API_KEYS", "").split(",") if k.strip()]
 
 
 # 2. FILE PATHS
